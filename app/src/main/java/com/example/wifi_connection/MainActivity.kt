@@ -67,8 +67,8 @@ class MainActivity : AppCompatActivity() {
     private fun suggestNetwork() {
         val wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
 
-        val networkSSID = "Apoorva5g"
-        val networkPass = "apoorva2003sp@"
+        val networkSSID = "ESP32_Config"
+        val networkPass = "12345678"
 
         val suggestion = WifiNetworkSuggestion.Builder()
             .setSsid(networkSSID)
@@ -119,9 +119,9 @@ class MainActivity : AppCompatActivity() {
                             "Select \"$networkSSID\" in Wi-Fi settings to enable internet access",
                             Toast.LENGTH_LONG
                         ).show()
-                        openExternalUrl("http://$gatewayIp/")
+                        openExternalUrl("http://$gatewayIp/login")
                     } else {
-                        openExternalUrl("http://$gatewayIp/")
+                        openExternalUrl("http://$gatewayIp/login")
                     }
                 }
             }

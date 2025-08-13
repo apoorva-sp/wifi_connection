@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray
     ) {
         wifiConnector.handlePermissionsResult(requestCode, grantResults)
+
     }
 
     override fun onResume() {

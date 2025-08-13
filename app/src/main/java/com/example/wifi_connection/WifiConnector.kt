@@ -1,86 +1,146 @@
 package com.example.wifi_connection
 
-import android.content.Context
+import android.Manifest
+import android.content.*
+import android.content.pm.PackageManager
 import android.net.*
-import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSpecifier
-import android.os.Build
-import android.text.format.Formatter
+import android.net.wifi.WifiNetworkSuggestion
+import android.provider.Settings
+import android.view.View
+import android.widget.ProgressBar
+import android.widget.TextView
+import android.widget.Toast
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
-class WifiConnector(private val context: Context) {
+class WifiConnector(
+    private val context: Context,
+    private val tvStatus: TextView,
+    private val progressBar: ProgressBar,
+    private val onSuccess: () -> Unit
+) {
+    private val PERMISSIONS_REQUEST_CODE = 100
 
-    private val connectivityManager =
-        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    fun checkPermissionsAndConnect() {
+        // Show loading spinner
+        progressBar.visibility = View.VISIBLE
+        tvStatus.text = "Checking permissions..."
 
-    // For API 29 and above — use NetworkSpecifier to connect
-    fun connectUsingNetworkSpecifier(
-        ssid: String,
-        password: String,
-        callback: (Boolean, String?) -> Unit
+        val permissions = arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_WIFI_STATE,
+            Manifest.permission.CHANGE_WIFI_STATE
+        )
+
+        val hasPermissions = permissions.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
+
+        if (!hasPermissions) {
+            ActivityCompat.requestPermissions(
+                context as android.app.Activity,
+                permissions,
+                PERMISSIONS_REQUEST_CODE
+            )
+        } else {
+            suggestNetwork()
+        }
+    }
+
+    fun handlePermissionsResult(
+        requestCode: Int,
+        grantResults: IntArray
     ) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            callback(false, null)
+        if (requestCode == PERMISSIONS_REQUEST_CODE) {
+            if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                suggestNetwork()
+            } else {
+                progressBar.visibility = View.GONE
+                Toast.makeText(context, "Permissions required to connect to Wi-Fi", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun suggestNetwork() {
+        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+
+        val networkSSID = "ESP32_Config" // TODO: Change to your SSID
+        val networkPass = "12345678" // TODO: Change to your password
+
+        tvStatus.text = "Adding Wi-Fi suggestion..."
+
+        val suggestion = WifiNetworkSuggestion.Builder()
+            .setSsid(networkSSID)
+            .setWpa2Passphrase(networkPass)
+            .build()
+
+        val status = wifiManager.addNetworkSuggestions(listOf(suggestion))
+
+        if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
+            tvStatus.text = "Suggestion added. Waiting for connection..."
+        } else {
+            tvStatus.text = "Failed to add suggestion. Status code: $status"
+            progressBar.visibility = View.GONE
             return
         }
 
-        val specifier = WifiNetworkSpecifier.Builder()
-            .setSsid(ssid)
-            .setWpa2Passphrase(password)
-            .build()
+        // Listen for connectivity changes
+        val connectivityFilter = IntentFilter("android.net.conn.CONNECTIVITY_CHANGE")
+        context.registerReceiver(object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                val cm = this@WifiConnector.context
+                    .getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                val activeNetwork = cm.activeNetwork
+                val capabilities = cm.getNetworkCapabilities(activeNetwork)
 
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .setNetworkSpecifier(specifier)
-            .build()
+                if (capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    val gatewayIp = getGatewayIpAddress()
+                    val hasInternet = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 
-        val networkCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                super.onAvailable(network)
-                connectivityManager.bindProcessToNetwork(network)
-                val gatewayIp = getGatewayIp()
-                callback(true, gatewayIp)
+                    tvStatus.text = if (hasInternet) {
+                        "Connected to $networkSSID with internet, IP: $gatewayIp"
+                    } else {
+                        "Connected to $networkSSID (local only), IP: $gatewayIp"
+                    }
+
+                    // Inside suggestNetwork(), after we get gatewayIp:
+                    val localUrl = "http://$gatewayIp/login"
+                    val browserIntent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(localUrl))
+                    browserIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    this@WifiConnector.context.startActivity(browserIntent)
+
+                    // Do NOT update tvStatus here.
+                    // We'll let MainActivity handle it after returning from browser.
+
+                    markWifiSetupDone()
+                    progressBar.visibility = View.GONE
+
+                    // Trigger callback
+                    onSuccess()
+
+                    // Unregister receiver
+                    context.unregisterReceiver(this)
+                }
             }
-
-            override fun onUnavailable() {
-                super.onUnavailable()
-                callback(false, null)
-            }
-        }
-
-        connectivityManager.requestNetwork(request, networkCallback)
+        }, connectivityFilter)
     }
 
-    // For API below 29 — use WifiManager to connect
-    fun connectUsingWifiManager(ssid: String, password: String): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // This method is deprecated on API 29+
-            return false
-        }
-
-        val wifiManager =
-            context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-
-        val wifiConfig = WifiConfiguration().apply {
-            SSID = "\"$ssid\""
-            preSharedKey = "\"$password\""
-            allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK)
-        }
-
-        val networkId = wifiManager.addNetwork(wifiConfig)
-        if (networkId == -1) return false
-
-        val enabled = wifiManager.enableNetwork(networkId, true)
-        val reconnected = wifiManager.reconnect()
-
-        return enabled && reconnected
+    private fun getGatewayIpAddress(): String {
+        val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val dhcpInfo = wifiManager.dhcpInfo
+        val gateway = dhcpInfo.gateway
+        return String.format(
+            "%d.%d.%d.%d",
+            gateway and 0xff,
+            gateway shr 8 and 0xff,
+            gateway shr 16 and 0xff,
+            gateway shr 24 and 0xff
+        )
     }
 
-    // Get gateway IP address of current Wi-Fi connection
-    fun getGatewayIp(): String? {
-        val wifiManager =
-            context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        val dhcpInfo = wifiManager.dhcpInfo ?: return null
-        return Formatter.formatIpAddress(dhcpInfo.gateway)
+    private fun markWifiSetupDone() {
+        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("wifi_connected_once", true).apply()
     }
 }
